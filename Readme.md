@@ -16,6 +16,7 @@ BASE_BB_REPO_URL | Url where repositories for a project prefix can be found. Add
 BB_USERNAME | Bitbucket username, can be left blank if the server does not require login.
 BB_PASSWORD | Bitbucket password. The username and password are used to attach Basic Authorization to each request. Can be left blank
 BB_GIT_BASE_FOLDER | base folder where the projects and repos should be cloned to. ***Default***: ./
+BB_MAX_JOBS | Maximum simultaneous cloning operations. ***Default:*** 4
 
 Once started, the application will attempt to get a list of all projects and a list of repositories for each project. Once the list os formed, the application will attempt to create a directory (project name) if it doesnt exist and then proceed to clone all of the repositories.
 

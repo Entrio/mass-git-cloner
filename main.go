@@ -1,4 +1,4 @@
-package playground
+package main
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 )
 
 type (
@@ -61,6 +62,17 @@ type (
 			} `json:"self"`
 		} `json:"links"`
 	}
+
+	cloneJob struct {
+		ID         int
+		Project    string
+		Repo       string
+		FinalPath  string
+		URL        string
+		Success    bool
+		FailReason *string
+		TimeTaken  float64
+	}
 )
 
 func main() {
@@ -79,11 +91,15 @@ func main() {
 		log.Fatalf("Please specify base url where bit bucket projects can be found. Use environmental variable `BASE_BB_URL` to do so")
 	}
 
+	if rootDirectory != "./" {
+		_ = os.MkdirAll(rootDirectory, os.ModePerm)
+	}
+
 	fmt.Println(fmt.Sprintf("Starting mass git clone. URL: %s, base repo url: %s", baseURL, baseRepoURL))
 	if username != "" {
 		plen := len(password)
 		passmask := ""
-		for i := 0; i < plen; i ++ {
+		for i := 0; i < plen; i++ {
 			passmask += "*"
 		}
 		fmt.Println(fmt.Sprintf("Username: %s, password: %s", username, passmask))
@@ -111,12 +127,14 @@ func main() {
 		log.Fatalf("Failed to unmarshal JSON: %s", err.Error())
 	}
 
+	var cloneJobs []cloneJob
+
 	for _, project := range data.Projects {
 		// need to fetch prefix for all projects and then get repos
 		if repoReq, err := http.NewRequest("GET", fmt.Sprintf(baseRepoURL, project.Key), nil); err != nil {
 			fmt.Println(fmt.Sprintf("There was an error forming request for project %s. Error was: %s", project.Name, err.Error()))
 		} else {
-			projectPath := fmt.Sprintf("./%s", project.Name)
+			projectPath := fmt.Sprintf("%s%s", rootDirectory, project.Name)
 			if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 				if err := os.Mkdir(projectPath, os.ModePerm); err != nil {
 					log.Fatalf("failed to create directory %s! Error: %s", projectPath, err.Error())
@@ -144,16 +162,12 @@ func main() {
 						for _, repository := range repo.Repos {
 							for _, link := range repository.Links.Clone {
 								if link.Name == "ssh" {
-									fmt.Println(fmt.Sprintf("Cloning repo %s (%s)", repository.Name, link.Href))
-									cmd := exec.Command("git", "clone", link.Href, fmt.Sprintf("%s/%s", projectPath, repository.Slug))
-									var out bytes.Buffer
-									cmd.Stdout = &out
-									err := cmd.Run()
-									if err != nil {
-										log.Fatal(err)
-									}
-									fmt.Println(fmt.Sprintf("Successfully cloned %s to %s", repository.Name, fmt.Sprintf("%s/%s", projectPath, repository.Slug)))
-									os.Exit(0)
+									cloneJobs = append(cloneJobs, cloneJob{
+										Project:   project.Name,
+										Repo:      repository.Name,
+										FinalPath: fmt.Sprintf("%s/%s", projectPath, repository.Slug),
+										URL:       link.Href,
+									})
 								}
 							}
 						}
@@ -161,5 +175,65 @@ func main() {
 				}
 			}
 		}
+	}
+
+	// Do actual cloning
+	maxGoroutines := subenv.EnvI("BB_MAX_JOBS", 4)
+	fmt.Println(fmt.Sprintf("Maximum clone jobs: %d", maxGoroutines))
+	guard := make(chan struct{}, maxGoroutines)
+
+	total := len(cloneJobs)
+	for i := 0; i < total; i++ {
+		guard <- struct{}{} // would block if guard channel is already filled
+		go func() {
+			clone(&cloneJobs[i], i, total)
+			<-guard
+		}()
+	}
+
+	var success, failure int
+
+	for _, v := range cloneJobs {
+		if v.Success {
+			success++
+		} else {
+			failure++
+		}
+	}
+
+	fmt.Println("Repository clone report:")
+	fmt.Println(fmt.Sprintf("Total: %d Succeeded: %d Failed: %d", len(cloneJobs), success, failure))
+	if failure > 0 {
+		for _, v := range cloneJobs {
+			if !v.Success {
+				fmt.Println(fmt.Sprintf("[%d] Failed '%s'", v.ID, v.URL))
+				if v.FailReason != nil {
+					fmt.Println(fmt.Sprintf("Reason: %s", *v.FailReason))
+				}
+			}
+		}
+	}
+
+	fmt.Println("All goroutines finished, exiting...")
+}
+
+func clone(cj *cloneJob, c, t int) {
+	cj.ID = c
+	start := time.Now()
+	commandFull := fmt.Sprintf("git clone %s %s", cj.URL, cj.FinalPath)
+	fmt.Println(fmt.Sprintf("[%d/%d] Executing command: '%s'", c, t, commandFull))
+	cmd := exec.Command("git", "clone", cj.URL, cj.FinalPath)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	end := time.Now()
+	if err != nil {
+		reason := err.Error()
+		fmt.Println(fmt.Sprintf("[%d/%d] Failed to execute '%s' Error was: %s", c, t, commandFull, err.Error()))
+		cj.FailReason = &reason
+	} else {
+		fmt.Println(fmt.Sprintf("[%d/%d] Successfully cloned %s, took %f second(s)", c, t, cj.FinalPath, end.Sub(start).Seconds()))
+		cj.Success = true
+		cj.TimeTaken = end.Sub(start).Seconds()
 	}
 }
